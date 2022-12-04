@@ -1,0 +1,96 @@
+---
+- name: Reset Kubernetes component
+  become: true
+  ansible.builtin.shell:
+    cmd: yes | kubeadm reset
+  register: my_output
+  changed_when: my_output.rc != 0
+
+- name: Initialize the cluster
+  become: true
+  ansible.builtin.command: |
+    kubeadm init
+      --pod-network-cidr="{{ pod_network_cidr }}" \
+      --cri-socket="{{ cri_socket }}" \
+      --control-plane-endpoint="{{ control_plane_endpoint }}" \
+      --skip-phases="{{ skip_phases }}"
+      --upload-certs \
+  args:
+    chdir: $HOME
+    creates: cluster_initialized.txt
+
+- name: Create .kube directory
+  become: true
+  become_user: "{{ ansible_user }}"
+  become_method: sudo
+  ansible.builtin.file:
+    path: /home/{{ ansible_user }}/.kube
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: 0755
+
+- name: Copies admin.conf to user's kube config
+  become: true
+  become_user: root
+  become_method: sudo
+  ansible.builtin.copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /home/{{ ansible_user }}/.kube/config
+    remote_src: true
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0600"
+
+- name: Remove the cache directory
+  become_user: "{{ ansible_user }}"
+  become_method: sudo
+  become: true
+  ansible.builtin.file:
+    path: /home/{{ ansible_user }}/.kube/cache
+    state: absent
+
+- name: Get the token for joining the nodes with Kuberentes master
+  ansible.builtin.command: kubeadm token create  --print-join-command
+  register: kubernetes_join_command
+  changed_when: my_output.rc != 0
+
+- name: Debug
+  ansible.builtin.debug:
+    msg: "{{ kubernetes_join_command.stdout }}"
+
+- name: Copy join command to local file
+  ansible.builtin.copy:
+    content: '{{ kubernetes_join_command.stdout }}'
+    dest: /tmp/kubernetes_join_command
+    mode: 0700
+  delegate_to: localhost
+
+- name: Configure kubectl command auto-completion
+  ansible.builtin.lineinfile:
+    dest: /home/{{ ansible_user }}/.bashrc
+    line: "source <(kubectl completion bash)"
+    insertafter: EOF
+
+- name: Check if Helm binary exists
+  ansible.builtin.stat:
+    path: "{{ helm_bin_path }}"
+  register: helm_check
+
+- name: Check Helm version
+  ansible.builtin.command: "{{ helm_bin_path }} version"
+  failed_when: false
+  changed_when: false
+  register: helm_existing_version
+
+- name: Download helm
+  ansible.builtin.unarchive:
+    src: "{{ helm_repo_path }}/helm-{{ helm_version }}-{{ helm_platform }}-{{ helm_arch }}.tar.gz"
+    dest: /tmp
+    remote_src: true
+    mode: 0755
+  register: helm_download
+  when: >
+    not helm_check.stat.exists
+    or helm_version not in helm_existing_version.stdout
+  notify: Copy helm binary into place
